@@ -10,7 +10,6 @@
 #include <driver/spi_master.h>
 #include <driver/i2c_master.h>
 
-// #include "QMC5883L.h"
 #include "BME280.h"
 
 static const char *TAG = "Test";
@@ -58,28 +57,6 @@ i2c_master_bus_handle_t init_i2c()
 	return bus_handle;
 }
 
-void i2c_probe(i2c_master_bus_handle_t bus_handle, uint16_t limit = 128)
-{
-	for (uint16_t address = 0; address < limit; ++address)
-	{
-		esp_err_t ret = i2c_master_probe(bus_handle, address, -1);
-		switch (ret)
-		{
-		case ESP_OK:
-			ESP_LOGD("I2C_Probe", "Addr: %04" PRIu16 " found device", address);
-			break;
-		case ESP_ERR_NOT_FOUND:
-			ESP_LOGD("I2C_Probe", "Addr: %04" PRIu16 " NACK", address);
-			break;
-		case ESP_ERR_TIMEOUT:
-			ESP_LOGD("I2C_Probe", "Addr: %04" PRIu16 " timeout", address);
-			break;
-		default:
-			ESP_LOGD("I2C_Probe", "Addr: %04" PRIu16 " shit", address);
-			break;
-		}
-	}
-}
 
 //
 
@@ -89,9 +66,6 @@ extern "C" void app_main(void)
 
 	spi_host_device_t spi_host = init_spi();
 	i2c_master_bus_handle_t i2c_host = init_i2c();
-
-	// i2c_probe(i2c_host);
-	// return;
 
 	BME280_I2C bme(i2c_host);
 
@@ -134,22 +108,4 @@ extern "C" void app_main(void)
 	vTaskDelay(pdMS_TO_TICKS(1000));
 
 	bme.deinit();
-
-	/*/
-		QMC5883L mag(i2c_host);
-		mag.init();
-
-		mag.set_mode(QMC5883L_MODE_CNTNS);
-		mag.set_rate(QMC5883L_RATE_200HZ);
-		mag.set_range(QMC5883L_RANGE_8G);
-		mag.set_samples(QMC5883L_SAMPLES_64);
-
-		while (true)
-		{
-			mag.read_3d();
-			vTaskDelay(pdMS_TO_TICKS(1000));
-		}
-
-		mag.deinit();
-	//*/
 }
