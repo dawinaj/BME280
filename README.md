@@ -1,20 +1,20 @@
-# ESP32 MCP23008 expander driver/library
+# ESP32 BME280 driver/library
 
-This is a single-file header-only C++ style library (see files in `main/include/`) for driving the **MCP23008** MicroChip's GPIO expander from an **ESP32** microcontroller.
+This is a single-file header-only C++ style library (see files in `main/include/`) for driving the **BME280** Bosch's humidity sensor from an **ESP32** microcontroller.
 
 Currently supported are:
-- MCP23008
+- BME280
 
 
-It is based on another library:
-- https://github.com/NSBum/esp32-mcp23008
+It uses the official Bosch API:
+- https://github.com/boschsensortec/BME280_SensorAPI
 
 
 ## Installation & usage
 See example in `main/main.cpp`.
 
 - Move the files from `main/include/` to your include directory.
-- Install `ropg/i2c_manager` library.
-- #include the `MCP23008.h` in your code.
+- Install `boschsensortec/BME280_SensorAPI` as component.
+- #include the `BME280.h` in your code.
 - Create an object.
 - Done!
