@@ -14,40 +14,23 @@
 #include <driver/i2c_master.h>
 #include <rom/ets_sys.h>
 
-
-#define BME280_INTF_RET_TYPE esp_err_t
 #include "BME280_SensorAPI.h"
-
-// #include "bitwise_print.h"
 
 //
 
-#define BME_RETURN_ON_ERROR(x, log_tag)                                                           \
-	do                                                                                            \
-	{                                                                                             \
-		uint8_t err_rc_ = (x);                                                                    \
-		esp_err_t err_rc_esp_ = bme280_err_to_esp_err(err_rc_);                                   \
-		if (unlikely(err_rc_ != BME280_OK))                                                       \
-		{                                                                                         \
-			ESP_LOGE(log_tag, "%s(%d): %s", __FUNCTION__, __LINE__, bme280_err_to_name(err_rc_)); \
-			return err_rc_esp_;                                                                   \
-		}                                                                                         \
+#define BME_RETURN_ON_ERROR(x, log_tag)                                             \
+	do                                                                              \
+	{                                                                               \
+		uint8_t err_rc_ = (x);                                                      \
+		if (unlikely(err_rc_ != BME280_OK))                                         \
+		{                                                                           \
+			ESP_LOGE(log_tag, "%s(%d): %s %s", __FUNCTION__, __LINE__,              \
+					 BME280::bmeerr_name(err_rc_), esp_err_to_name(dev.intf_rslt)); \
+			return BME280::bmeerr_to_esp(err_rc_);                                  \
+		}                                                                           \
 	} while (0)
 
 //
-
-enum bme280_mode_t : uint8_t
-{
-	BME280_MODE_SLEEP = BME280_POWERMODE_SLEEP,
-	BME280_MODE_FORCED = BME280_POWERMODE_FORCED,
-	BME280_MODE_NORMAL = BME280_POWERMODE_NORMAL,
-};
-
-// enum bme280_status_t : uint8_t
-// {
-// 	BME280_STATUS_IMUPD = BME280_STATUS_IM_UPDATE,
-// 	BME280_STATUS_DONE = BME280_STATUS_MEAS_DONE,
-// };
 
 enum bme280_samples_t : uint8_t
 {
@@ -87,14 +70,15 @@ enum bme280_filter_t : uint8_t
 	BME280_FILTER_MAX = BME280_FILTER_COEFF_16,
 };
 
-// struct bme280_config_t
-// {
-// 	bme280_samples_t osr_p;
-// 	bme280_samples_t osr_t;
-// 	bme280_samples_t osr_h;
-// 	bme280_filter_t filter;
-// 	bme280_tsby_t sby_time;
-// };
+struct bme280_config_t
+{
+	bme280_samples_t osr_p;
+	bme280_samples_t osr_t;
+	bme280_samples_t osr_h;
+	bme280_filter_t filter;
+	bme280_tsby_t sby_time;
+};
+
 //
 
 class BME280
@@ -154,7 +138,8 @@ protected:
 	bme280_settings settings_current = {};
 	bme280_settings settings_desired = {};
 
-	uint32_t period;
+	uint32_t period = 0;
+	bool continuous = false;
 
 public:
 	BME280() = default;
@@ -179,6 +164,22 @@ public:
 	}
 
 	//
+
+	esp_err_t continuous_mode(bool c)
+	{
+		continuous = c;
+
+		if (continuous)
+			BME_RETURN_ON_ERROR(
+				bme280_set_sensor_mode(BME280_POWERMODE_NORMAL, &dev),
+				TAG);
+		else
+			BME_RETURN_ON_ERROR(
+				bme280_set_sensor_mode(BME280_POWERMODE_SLEEP, &dev),
+				TAG);
+
+		return ESP_OK;
+	}
 
 	const bme280_settings &settings_clear()
 	{
@@ -221,12 +222,7 @@ public:
 			bme280_cal_meas_delay(&period, &settings_current),
 			TAG);
 
-		/* Always set the power mode after setting the configuration */
-		BME_RETURN_ON_ERROR(
-			bme280_set_sensor_mode(BME280_POWERMODE_NORMAL, &dev),
-			TAG);
-
-		return ESP_OK;
+		return continuous_mode(continuous); // reapply mode
 	}
 
 	//
@@ -236,25 +232,108 @@ public:
 		uint8_t status_reg;
 		bme280_data comp_data;
 
+		out = {};
+
+		if (!continuous)
+			BME_RETURN_ON_ERROR(
+				bme280_set_sensor_mode(BME280_POWERMODE_FORCED, &dev),
+				TAG);
+
+		dev.delay_us(period, dev.intf_ptr);
+
 		BME_RETURN_ON_ERROR(
 			bme280_get_regs(BME280_REG_STATUS, &status_reg, 1, &dev),
 			TAG);
+		if (status_reg & BME280_STATUS_MEAS_DONE) // shouldnt really happen but it was in the original example so whatever
+			return ESP_ERR_NOT_FINISHED;
 
-		if (status_reg & BME280_STATUS_MEAS_DONE)
-		{
-			dev.delay_us(period, dev.intf_ptr);
+		// do // alternatively to throwing error, wait until completion
+		// {
+		// 	BME_RETURN_ON_ERROR(
+		// 		bme280_get_regs(BME280_REG_STATUS, &status_reg, 1, &dev),
+		// 		TAG);
+		// } while (status_reg & BME280_STATUS_MEAS_DONE);
 
-			BME_RETURN_ON_ERROR(
-				bme280_get_sensor_data(BME280_ALL, &comp_data, &dev),
-				TAG);
+		BME_RETURN_ON_ERROR(
+			bme280_get_sensor_data(BME280_ALL, &comp_data, &dev),
+			TAG);
 
-			out = bme_data_to_meas(comp_data);
-			return ESP_OK;
-		}
-		return ESP_FAIL;
+		out = bme_data_to_meas(comp_data);
+		return ESP_OK;
 	}
 
 	//
+
+	static float get_sea_level_pressure(const Meas &meas, float h = 0)
+	{
+		return meas.pressure * std::pow(1 - h * (g / cp / T0), -cp * M / R0);
+	}
+
+	static float get_sea_level_altitude(const Meas &meas, float p0 = 101325)
+	{
+		return cp * T0 / g * (1 - std::pow(meas.pressure / p0, R0 / cp / M));
+	}
+
+protected:
+	static esp_err_t bme280_read(uint8_t reg_addr, uint8_t *reg_data, uint32_t len, void *intf_ptr);
+	static esp_err_t bme280_write(uint8_t reg_addr, const uint8_t *reg_data, uint32_t len, void *intf_ptr);
+	static void bme280_delay_us(uint32_t period, void *intf_ptr)
+	{
+		ets_delay_us(period);
+	}
+
+protected:
+	static const char *bmeerr_name(int8_t rslt)
+	{
+		switch (rslt)
+		{
+		case BME280_OK:
+			return "BME280_OK";
+		case BME280_E_NULL_PTR:
+			return "BME280_E_NULL_PTR";
+		case BME280_E_COMM_FAIL:
+			return "BME280_E_COMM_FAIL";
+		case BME280_E_INVALID_LEN:
+			return "BME280_E_INVALID_LEN";
+		case BME280_E_DEV_NOT_FOUND:
+			return "BME280_E_DEV_NOT_FOUND";
+		case BME280_E_SLEEP_MODE_FAIL:
+			return "BME280_E_SLEEP_MODE_FAIL";
+		case BME280_E_NVM_COPY_FAILED:
+			return "BME280_E_NVM_COPY_FAILED";
+		case BME280_W_INVALID_OSR_MACRO:
+			return "BME280_W_INVALID_OSR_MACRO";
+		default:
+			return "BME280_E_UNKNOWN";
+		}
+	}
+
+	static esp_err_t bmeerr_to_esp(int8_t rslt)
+	{
+		switch (rslt)
+		{
+		case BME280_OK:
+			return ESP_OK;
+		case BME280_E_NULL_PTR:
+			return ESP_ERR_INVALID_ARG;
+		case BME280_E_COMM_FAIL:
+			return ESP_ERR_NOT_FINISHED;
+		case BME280_E_INVALID_LEN:
+			return ESP_ERR_INVALID_SIZE;
+		case BME280_E_DEV_NOT_FOUND:
+			return ESP_ERR_NOT_FOUND;
+		case BME280_E_SLEEP_MODE_FAIL:
+			return ESP_ERR_INVALID_RESPONSE;
+		case BME280_E_NVM_COPY_FAILED:
+			return ESP_ERR_INVALID_STATE;
+		case BME280_W_INVALID_OSR_MACRO:
+			return ESP_ERR_INVALID_ARG;
+		default:
+			return ESP_FAIL;
+		}
+	}
+
+private:
 #ifdef BME280_DOUBLE_ENABLE
 	Meas bme_data_to_meas(const bme280_data &data)
 	{
@@ -281,105 +360,6 @@ public:
 	}
 #endif
 
-	static float get_sea_level_pressure(const Meas &meas, float h = 0)
-	{
-		return meas.pressure * std::pow(1 - h * (g / cp / T0), -cp * M / R0);
-	}
-
-	static float get_sea_level_altitude(const Meas &meas, float p0 = 101325)
-	{
-		return cp * T0 / g * (1 - std::pow(meas.pressure / p0, R0 / cp / M));
-	}
-
-	//
-	/*/
-		void debug() // Meas &pack
-		{
-			int8_t rslt;
-			uint32_t periodi;
-
-			rslt = bme280_cal_meas_delay(&periodi, &settings_current);
-
-			printf("\nTemperature calculation (Data displayed are compensated values)\n");
-			printf("Measurement time: %lu us\n\n", (long unsigned int)periodi);
-
-			int8_t idx = 0;
-			uint8_t status_reg;
-			bme280_data comp_data;
-
-			while (idx < 5)
-			{
-				rslt = bme280_get_regs(BME280_REG_STATUS, &status_reg, 1, &dev);
-
-				if (status_reg & BME280_STATUS_MEAS_DONE)
-				{
-					dev.delay_us(periodi, dev.intf_ptr);
-
-					rslt = bme280_get_sensor_data(BME280_ALL, &comp_data, &dev);
-
-					printf("Temperature[%d]: %lf *C\n", idx, comp_data.temperature);
-					printf("Pressure[%d]:    %lf Pa\n", idx, comp_data.pressure);
-					printf("Humidity[%d]:    %lf %%RH\n", idx, comp_data.humidity);
-
-					idx++;
-				}
-				vTaskDelay(pdMS_TO_TICKS(1000));
-			}
-		}
-		//*/
-
-protected:
-	static BME280_INTF_RET_TYPE bme280_read(uint8_t reg_addr, uint8_t *reg_data, uint32_t len, void *intf_ptr);
-	static BME280_INTF_RET_TYPE bme280_write(uint8_t reg_addr, const uint8_t *reg_data, uint32_t len, void *intf_ptr);
-
-	static void bme280_delay_us(uint32_t period, void *intf_ptr)
-	{
-		ets_delay_us(period);
-	}
-
-	static const char *bme280_err_to_name(int8_t rslt)
-	{
-		switch (rslt)
-		{
-		case BME280_OK:
-			return "BME280_OK";
-		case BME280_E_NULL_PTR:
-			return "BME280_E_NULL_PTR";
-		case BME280_E_COMM_FAIL:
-			return "BME280_E_COMM_FAIL";
-		case BME280_E_DEV_NOT_FOUND:
-			return "BME280_E_DEV_NOT_FOUND";
-		case BME280_E_INVALID_LEN:
-			return "BME280_E_INVALID_LEN";
-		default:
-			return "BME280_E_UNKNOWN";
-		}
-	}
-
-	static esp_err_t bme280_err_to_esp_err(int8_t rslt)
-	{
-		switch (rslt)
-		{
-		case BME280_OK:
-			return ESP_OK;
-		case BME280_E_NULL_PTR:
-			return ESP_ERR_INVALID_ARG;
-		case BME280_E_COMM_FAIL:
-			return ESP_ERR_NOT_FINISHED;
-		case BME280_E_DEV_NOT_FOUND:
-			return ESP_ERR_NOT_FOUND;
-		case BME280_E_INVALID_LEN:
-			return ESP_ERR_INVALID_SIZE;
-		default:
-			return ESP_FAIL;
-		}
-	}
-
-	// virtual esp_err_t write_reg(Register reg, uint8_t val) = 0;
-	// virtual esp_err_t read_reg(Register reg, uint8_t &out) = 0;
-
-	// virtual esp_err_t read_regs(Register regb, Register rege, uint8_t *out) = 0;
-
 private:
 	static constexpr float cp = 1004.68506;	 // J/(kg*K)	Constant-pressure specific heat
 	static constexpr float T0 = 288.15;		 // K			Sea level standard temperature
@@ -390,21 +370,15 @@ private:
 	// static bme280_settings config_enum_to_macro(const bme280_config_t &cfg)
 	// {
 	// 	bme280_settings sett = {};
-
 	// 	sett.osr_p = static_cast<uint8_t>(cfg.osr_p);
 	// 	sett.osr_t = static_cast<uint8_t>(cfg.osr_t);
 	// 	sett.osr_h = static_cast<uint8_t>(cfg.osr_h);
-
 	// 	sett.filter = static_cast<uint8_t>(cfg.filter);
 	// 	sett.standby_time = static_cast<uint8_t>(cfg.sby_time);
-
 	// 	return sett;
 	// }
 };
 
-///
-///
-///
 ///
 
 class BME280_I2C : public BME280
@@ -417,7 +391,7 @@ private:
 	i2c_master_dev_handle_t i2c_hdl = nullptr;
 
 public:
-	BME280_I2C(i2c_master_bus_handle_t ih, uint16_t a = 0b0, uint32_t chz = 100'000) : i2c_host(ih), address(0x76 | (a & 0b1)), clk_hz(chz)
+	BME280_I2C(i2c_master_bus_handle_t ih, uint16_t a = 0b0, uint32_t chz = 400'000) : i2c_host(ih), address(0x76 | (a & 0b1)), clk_hz(chz)
 	{
 		ESP_LOGI(TAG, "Constructed with address: %d", address); // port: %d, , ih
 	}
@@ -467,49 +441,7 @@ public:
 	//
 
 private:
-	/*/
-		esp_err_t write_reg(Register reg, uint8_t val) override
-		{
-			assert(i2c_hdl);
-
-			std::array<uint8_t, 2> txbuf = {static_cast<uint8_t>(reg), val};
-
-			ESP_RETURN_ON_ERROR(
-				i2c_master_transmit(i2c_hdl, txbuf.data(), txbuf.size(), -1),
-				TAG, "Failed to i2c_master_transmit!");
-
-			return ESP_OK;
-		}
-
-		esp_err_t read_reg(Register reg, uint8_t &out) override
-		{
-			assert(i2c_hdl);
-
-			std::array<uint8_t, 1> txbuf = {static_cast<uint8_t>(reg)};
-
-			ESP_RETURN_ON_ERROR(
-				i2c_master_transmit_receive(i2c_hdl, txbuf.data(), txbuf.size(), &out, 1, -1),
-				TAG, "Failed to i2c_master_transmit_receive!");
-
-			return ESP_OK;
-		}
-
-		esp_err_t read_regs(Register regb, Register rege, uint8_t *out) override
-		{
-			assert(i2c_hdl);
-
-			std::array<uint8_t, 1> txbuf = {static_cast<uint8_t>(regb)};
-			size_t len = static_cast<size_t>(rege) - static_cast<size_t>(regb) + 1;
-
-			ESP_RETURN_ON_ERROR(
-				i2c_master_transmit_receive(i2c_hdl, txbuf.data(), txbuf.size(), out, len, -1),
-				TAG, "Failed to i2c_master_transmit_receive!");
-
-			return ESP_OK;
-		}
-	//*/
-
-	static BME280_INTF_RET_TYPE bme280_read(uint8_t reg_addr, uint8_t *reg_data, uint32_t len, void *intf_ptr)
+	static esp_err_t bme280_read(uint8_t reg_addr, uint8_t *reg_data, uint32_t len, void *intf_ptr)
 	{
 		i2c_master_dev_handle_t i2c_hdl = static_cast<i2c_master_dev_handle_t>(intf_ptr);
 
@@ -520,18 +452,130 @@ private:
 		return ESP_OK;
 	}
 
-	static BME280_INTF_RET_TYPE bme280_write(uint8_t reg_addr, const uint8_t *reg_data, uint32_t len, void *intf_ptr)
+	static esp_err_t bme280_write(uint8_t reg_addr, const uint8_t *reg_data, uint32_t len, void *intf_ptr)
 	{
-		assert(len == 1); // Seems so in the API. If not, Gods help us.
-		// Because of `multiple byte write (using pairs of register addresses and register data)` would need interleaving.
-
 		i2c_master_dev_handle_t i2c_hdl = static_cast<i2c_master_dev_handle_t>(intf_ptr);
 
-		std::array<uint8_t, 2> txbuf = {static_cast<uint8_t>(reg_addr), reg_data[0]};
+		std::array<uint8_t, 2 * BME280_MAX_LEN> txbuf = {static_cast<uint8_t>(reg_addr)};
+		std::copy(reg_data, reg_data + len, txbuf.begin() + 1);
 
 		ESP_RETURN_ON_ERROR(
-			i2c_master_transmit(i2c_hdl, txbuf.data(), txbuf.size(), -1),
+			i2c_master_transmit(i2c_hdl, txbuf.data(), len + 1, -1),
 			TAG, "Failed to i2c_master_transmit!");
+
+		return ESP_OK;
+	}
+};
+
+//
+
+class BME280_SPI : public BME280
+{
+
+private:
+	spi_host_device_t spi_host;
+	gpio_num_t cs_gpio;
+	int clk_hz;
+	spi_device_handle_t spi_hdl = nullptr;
+
+public:
+	BME280_SPI(spi_host_device_t sh, gpio_num_t csg, int chz = 10'000'000) : spi_host(sh), cs_gpio(csg), clk_hz(chz)
+	{
+		ESP_LOGI(TAG, "Constructed with host: %d, pin: %d", spi_host, cs_gpio);
+	}
+	~BME280_SPI() = default;
+
+	esp_err_t init(bool tw = false)
+	{
+		assert(!spi_hdl);
+		assert(tw == false); // threewire does not work for now
+
+		const spi_device_interface_config_t dev_cfg = {
+			.command_bits = 0,
+			.address_bits = 8,
+			.dummy_bits = 0,
+			.mode = 0,
+			.clock_source = SPI_CLK_SRC_DEFAULT,
+			.duty_cycle_pos = 0,
+			.cs_ena_pretrans = 0,
+			.cs_ena_posttrans = 0,
+			.clock_speed_hz = clk_hz,
+			.input_delay_ns = 0,
+			.spics_io_num = cs_gpio,
+			.flags = SPI_DEVICE_HALFDUPLEX | (tw ? SPI_DEVICE_3WIRE : 0u),
+			.queue_size = 1,
+			.pre_cb = NULL,
+			.post_cb = NULL,
+		};
+
+		ESP_RETURN_ON_ERROR(
+			spi_bus_add_device(spi_host, &dev_cfg, &spi_hdl),
+			TAG, "Error in spi_bus_add_device!");
+
+		dev.intf = BME280_SPI_INTF;
+		dev.intf_ptr = static_cast<void *>(spi_hdl);
+
+		dev.read = bme280_read;
+		dev.write = bme280_write;
+		dev.delay_us = bme280_delay_us;
+
+		if (tw)
+		{
+			uint8_t reg_addr = BME280_REG_CONFIG;
+			uint8_t reg_data = 0b1;
+
+			BME_RETURN_ON_ERROR(
+				bme280_set_regs(&reg_addr, &reg_data, 1, &dev), // set 3-wire mode
+				TAG);
+		}
+
+		return BME280::init();
+	}
+
+	esp_err_t deinit()
+	{
+		assert(spi_hdl);
+
+		ESP_RETURN_ON_ERROR(
+			spi_bus_remove_device(spi_hdl),
+			TAG, "Error in spi_bus_remove_device!");
+
+		spi_hdl = nullptr;
+
+		return BME280::deinit();
+	}
+
+	//
+
+private:
+	static esp_err_t bme280_read(uint8_t reg_addr, uint8_t *reg_data, uint32_t len, void *intf_ptr)
+	{
+		static spi_transaction_t trx = {};
+		spi_device_handle_t spi_hdl = static_cast<spi_device_handle_t>(intf_ptr);
+
+		trx.addr = reg_addr;
+		trx.rx_buffer = reg_data;
+		trx.rxlength = len * 8;
+
+		ESP_RETURN_ON_ERROR(
+			spi_device_polling_transmit(spi_hdl, &trx),
+			TAG, "Failed to spi_device_polling_transmit!");
+
+		return ESP_OK;
+	}
+
+	static esp_err_t bme280_write(uint8_t reg_addr, const uint8_t *reg_data, uint32_t len, void *intf_ptr)
+	{
+		static spi_transaction_t trx = {};
+		spi_device_handle_t spi_hdl = static_cast<spi_device_handle_t>(intf_ptr);
+
+		trx.addr = reg_addr;
+		trx.tx_buffer = reg_data;
+		trx.length = len * 8;
+
+		ESP_RETURN_ON_ERROR(
+			spi_device_polling_transmit(spi_hdl, &trx),
+			TAG, "Failed to spi_device_polling_transmit!");
 
 		return ESP_OK;
 	}
