@@ -10,6 +10,7 @@
 #include <driver/spi_master.h>
 #include <driver/i2c_master.h>
 
+// #include "QMC5883L.h"
 #include "BME280.h"
 
 static const char *TAG = "Test";
@@ -18,7 +19,7 @@ spi_host_device_t init_spi()
 {
 	spi_bus_config_t bus_cfg = {
 		.mosi_io_num = GPIO_NUM_23,
-		.miso_io_num = GPIO_NUM_19,
+		.miso_io_num = GPIO_NUM_19, // GPIO_NUM_19, GPIO_NUM_NC
 		.sclk_io_num = GPIO_NUM_18,
 		.quadwp_io_num = GPIO_NUM_NC,
 		.quadhd_io_num = GPIO_NUM_NC,
@@ -29,9 +30,10 @@ spi_host_device_t init_spi()
 		.max_transfer_sz = 0,
 		.flags = SPICOMMON_BUSFLAG_MASTER,
 		.isr_cpu_id = ESP_INTR_CPU_AFFINITY_AUTO,
+		.intr_flags = 0,
 	};
 
-	spi_bus_initialize(SPI3_HOST, &bus_cfg, 0);
+	spi_bus_initialize(SPI3_HOST, &bus_cfg, SPI_DMA_DISABLED); // SPI_DMA_DISABLED // SPI_DMA_CH_AUTO
 
 	return SPI3_HOST;
 }
@@ -57,21 +59,44 @@ i2c_master_bus_handle_t init_i2c()
 	return bus_handle;
 }
 
+void i2c_probe(i2c_master_bus_handle_t bus_handle, uint16_t limit = 128)
+{
+	for (uint16_t address = 0; address < limit; ++address)
+	{
+		esp_err_t ret = i2c_master_probe(bus_handle, address, -1);
+		switch (ret)
+		{
+		case ESP_OK:
+			ESP_LOGD("I2C_Probe", "Addr: %04" PRIu16 " found device", address);
+			break;
+		case ESP_ERR_NOT_FOUND:
+			ESP_LOGD("I2C_Probe", "Addr: %04" PRIu16 " NACK", address);
+			break;
+		case ESP_ERR_TIMEOUT:
+			ESP_LOGD("I2C_Probe", "Addr: %04" PRIu16 " timeout", address);
+			break;
+		default:
+			ESP_LOGD("I2C_Probe", "Addr: %04" PRIu16 " shit", address);
+			break;
+		}
+	}
+}
 
 //
 
 extern "C" void app_main(void)
 {
-	esp_log_level_set("*", ESP_LOG_VERBOSE);
+	esp_log_level_set("*", ESP_LOG_DEBUG); // ESP_LOG_VERBOSE
 
 	spi_host_device_t spi_host = init_spi();
 	i2c_master_bus_handle_t i2c_host = init_i2c();
 
-	BME280_I2C bme(i2c_host);
+	// BME280_I2C bme(i2c_host);
+	BME280_SPI bme(spi_host, GPIO_NUM_2);
 
-	vTaskDelay(pdMS_TO_TICKS(1000));
+	vTaskDelay(pdMS_TO_TICKS(100));
 
-	bme.init();
+	bme.init(true);
 	bme.settings_filt(BME280_FILTER_2);
 	bme.settings_press(BME280_SAMPLES_1);
 	bme.settings_temp(BME280_SAMPLES_1);
@@ -80,16 +105,14 @@ extern "C" void app_main(void)
 
 	bme.apply_settings();
 
-	vTaskDelay(pdMS_TO_TICKS(1000));
+	// bme.continuous_mode(false);
 
-	// bme.debug();
-
-	vTaskDelay(pdMS_TO_TICKS(1000));
+	vTaskDelay(pdMS_TO_TICKS(100));
 
 	printf("\nTemperature calculation (Data displayed are compensated values)\n");
 	int8_t idx = 0;
 
-	while (idx < 5)
+	while (idx < 1)
 	{
 		BME280::Meas meas;
 		bme.measure(meas);
@@ -102,10 +125,28 @@ extern "C" void app_main(void)
 		// printf("Altitude[%d]:    %lf m\n", idx, BME280::get_sea_level_altitude(meas));
 
 		idx++;
-		vTaskDelay(pdMS_TO_TICKS(1000));
+		vTaskDelay(pdMS_TO_TICKS(100));
 	}
 
 	vTaskDelay(pdMS_TO_TICKS(1000));
 
 	bme.deinit();
+
+	/*/
+		QMC5883L mag(i2c_host);
+		mag.init();
+
+		mag.set_mode(QMC5883L_MODE_CNTNS);
+		mag.set_rate(QMC5883L_RATE_200HZ);
+		mag.set_range(QMC5883L_RANGE_8G);
+		mag.set_samples(QMC5883L_SAMPLES_64);
+
+		while (true)
+		{
+			mag.read_3d();
+			vTaskDelay(pdMS_TO_TICKS(1000));
+		}
+
+		mag.deinit();
+	//*/
 }
