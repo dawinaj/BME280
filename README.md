@@ -16,6 +16,6 @@ See example in `main/main.cpp`.
 - Move the files from `main/include/` to your include directory.
 - Install `boschsensortec/BME280_SensorAPI` as component.
 - #include the `BME280.h` in your code.
-- Change preferred intermediate type used by Bosch API in the `defs.h` file (double, int32, int64) and type returned by this wrapper (double, float, float)
-- Create an object.
+- Change in the `defs.h` file, preferred intermediate type used by Bosch API (double, int32, int64) (and as a result the type returned by this wrapper (double, float, float))
+- Create an object of an implementation class (`I2C`, `SPI`).
 - Done!
