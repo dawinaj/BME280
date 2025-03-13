@@ -12,6 +12,7 @@
 
 #include <driver/gpio.h>
 #include <driver/i2c_master.h>
+#include <driver/spi_master.h>
 #include <rom/ets_sys.h>
 
 #include "BME280_SensorAPI.h"
